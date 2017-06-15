@@ -66,9 +66,8 @@
 #define servo_trim 1 // how much to adjust servo speed to correct for flipper centering
 #define servo_bound 6 // max difference between forward and backward servo speeds
 #define joy_pot_max 255 // maximum value of joystick output
-#define deadband 20 // region that the joystick might rest
-#define extra_dead 125 // mostly for right joystick to separate roll and pitch
-#define RP_deadband 50 // region where the right joystick begins to work
+#define deadband 30 // region that the joystick might rest
+#define extra_dead 150 // mostly for right joystick to separate roll and pitch
 #define yaw_surf_speed 30 // wheel rotation speed when changing yaw on a drive surface
 #define step_tolerance 150 //Sets the threshold for flipper step function to determine acceptable flipper position error
 #define timeout 300 // Number of allowable steps for flipper zeroing before step_through() exits while loop
@@ -99,15 +98,20 @@ unsigned int target_center = 2063;
 unsigned char delta = 150; // this defines the range of motion (originally 150)//
 unsigned int target;
 unsigned int flip_pos;
+unsigned int P_loop_pos = 0;
+unsigned int P_loop_neg = 0;
+unsigned int R_loop_CC = 0;
+unsigned int R_loop_C = 0;
 unsigned int zero_pos1 = 0;
 unsigned int zero_pos2 = 0;
 unsigned int zero_pos3 = 0;
-
+double motor_adjust[3] = {0.35,0.5,0.4};  //Sets relative motor velocities for all_oscillate(), flipper_reset() >>> step_through()
 
 // the following track what driving mode the robot it currently in
 boolean roll_state = false;
 boolean pitch_state = false;
 boolean yaw_state = false;
+boolean start_pos_sig = false;
 boolean wiggle_state = false; // if current state requires flipper motion
 boolean m1_state = true;      // track last direction for motor for controlling oscillation
 boolean m2_state = true;
@@ -242,9 +246,9 @@ void setup() {
    read_position(encoder_1); // first read usually garbage
    read_position(encoder_2);
    read_position(encoder_3);
-  // flip_pos = read_position(encoder_1); // second read gives actual position
-  // flip_pos = read_position(encoder_2);
-  // flip_pos = read_position(encoder_3);
+   flip_pos = read_position(encoder_1); // second read gives actual position
+   flip_pos = read_position(encoder_2);
+   flip_pos = read_position(encoder_3);
 
   // initialize brushless DC motor (BDCM) electronic speed controller (ESC)
   Serial.println("Initializing ESC (wait for 2 seconds)");
@@ -391,11 +395,17 @@ loop_top:
       boolean dir;
       if (incoming[3] > 0) {
         dir = true;
-        Serial.print("Clockwise ");
+        if ((loop_count-R_loop_C) > 1) start_pos_sig=true;
+        else start_pos_sig =false;
+        R_loop_C = loop_count;
+        Serial.print("Clockwise Roll Right ");
       }
       else {
+        if ((loop_count-R_loop_CC) > 1) start_pos_sig=true;
+        else start_pos_sig =false;
         dir = false;
-        Serial.print("Counter-clockwise ");
+        R_loop_CC = loop_count;
+        Serial.print("Counter-clockwise Roll Left ");
       }
       Serial.println("roll");
       roll(dir);
@@ -405,15 +415,21 @@ loop_top:
       // vertical of right joystick used to adjust pitch
       boolean dir;
       if (incoming[4] < 0) {
+        if ((loop_count-P_loop_pos) > 1) start_pos_sig=true;
+        else start_pos_sig =false;
         // inverse vertical needs to be reversed
         Serial.println("Pitch up");
         dir = true;
+        P_loop_pos = loop_count;
       }
       else {
+        if ((loop_count-P_loop_neg) > 1) start_pos_sig=true;
+        else start_pos_sig =false;
         Serial.println("Pitch down");
         dir = false;
       }
       pitch(dir);
+      P_loop_neg = loop_count;
       pitch_state = true;
     }
 
@@ -699,7 +715,6 @@ void step_through (unsigned char motor_num, unsigned char encoder_num, unsigned 
 //  unsigned char encoders[3] = {encoder_1,encoder_2,encoder_3};
 //  unsigned char encoder_num = encoders[motor_num-1];
   unsigned int zero_arr[3] = {zero_pos1,zero_pos2,zero_pos3};
-  double motor_speeds[3] = {0.35,0.5,0.4};
   bool loop = true;
   unsigned char x = 0;
   // Section to determine speed and set speed constants for each motor
@@ -720,7 +735,7 @@ void step_through (unsigned char motor_num, unsigned char encoder_num, unsigned 
       Serial.println(target,DEC);
       loop = false;
     }
-    cmd_pololu (motor_num, 1, motor_speeds[motor_num-1]*flip_speed); // drive motor forward/backward
+    cmd_pololu (motor_num, 1, motor_adjust[motor_num-1]*flip_speed); // drive motor forward/backward
     delay(motor_stop_delay/5); // for a certain number of milliseconds
     cmd_pololu (motor_num, 0, 0); // stop motor
     delay(1.5*motor_stop_delay); // wait to make sure there's no cross-interference & motor fully stopped
@@ -854,16 +869,16 @@ unsigned int read_pos_corrected (unsigned char encoder_num, unsigned int zero_po
   // ~10% of the encoder readings are wrong, often the reading is 4096 minus the proper position
   // 4 samples seems to be good enough if we just toss the highest and lowest readings
   //Serial.println("Begin read_pos_corrected");
-  unsigned int enc_samples[3];
-  for (unsigned char i = 0; i < 3; i++) {
-    enc_samples[i] = read_position(encoder_num);
+  unsigned int enc_samples[5];
+  for (unsigned char i = 0; i < 5; i++) {
+    enc_samples[i] = (read_position(encoder_num) + zero_position) % 4096;
     delay(2);
   }
   // need to sort array from smallest to largest to find median
   for (int i = 0; i < 5; i++) {
-    for (int o = 0; o < 2; o++) {
+    for (int o = 0; o < 4; o++) {
       if (enc_samples[o] > enc_samples[o + 1]) {
-        int t = enc_samples[o] - zero_position;
+        int t = enc_samples[o];
         enc_samples[o] = enc_samples[o + 1];
         enc_samples[o + 1] = t;
       }
@@ -878,7 +893,7 @@ unsigned int read_pos_corrected (unsigned char encoder_num, unsigned int zero_po
     Serial.print(", ");
     Serial.println(enc_samples[2]);
   */
-  return enc_samples[1];
+  return enc_samples[2];
 }
 //////////////////////////////////////////////////////////////////////////////////////////
 //all_flip_pos new_zero() {
@@ -1100,18 +1115,18 @@ boolean choppy_set_pos_one(unsigned char m_box, unsigned int target) {
       unsigned int slow_down_range = 500;
       unsigned char close_speed;
       if (motor_cmds.dist < slow_down_range) {
-        close_speed = flip_speed - (float)motor_cmds.dist / 15;
+        close_speed = flip_speed - (float)motor_cmds.dist / (flip_speed*motor_adjust[m_box-1]);
   //      Serial.print("Scaled speed: ");
   //      Serial.println(close_speed, DEC);
       }
       else close_speed = flip_speed;
  
       start = millis();
-      cmd_pololu(m_box, motor_cmds.dir, close_speed);
+      cmd_pololu(m_box, motor_cmds.dir, motor_adjust[m_box-1]*close_speed);
  ///////////////////////////////////////////////////////////////////////////////////////////////////////
       while (!(m1_state)) {
         // loop until time is up
-        if (millis() - start > expected_time) m1_state = true;//|| expected_time == 0
+        if (millis() - start >= expected_time) m1_state = true;//|| expected_time == 0
         int temp = millis();
   //      Serial.println("Wait until target reached.\n");
   //      Serial.print("Expected time: ");
@@ -1124,10 +1139,9 @@ boolean choppy_set_pos_one(unsigned char m_box, unsigned int target) {
 }
 ///////////////////////////////////////////////////////////////////////////////////////////
 boolean PID_set_pos_one (unsigned char motor_num, unsigned int target) {
-  unsigned int zero_arr[3] = {zero_pos1, zero_pos2, zero_pos3};
- // for M2 : speedy min = 7, scale factor = 0.068, max_PID = 40
-  unsigned int current_pos = read_pos_corrected (enc_num_for_motor(motor_num), zero_arr[motor_num + 1]);
-  
+ // for M2 : speedy min = 7, scale factor = 0.068
+  unsigned int zero_arr[3]={zero_pos1,zero_pos2,zero_pos3};
+  unsigned int current_pos = read_pos_corrected (enc_num_for_motor(motor_num),zero_arr[motor_num+1]);
   
   Serial.print("current position: ");
   Serial.println(current_pos);
@@ -1136,7 +1150,7 @@ boolean PID_set_pos_one (unsigned char motor_num, unsigned int target) {
   
 
   dir_dist displacement = find_dir_dist(current_pos, target);
-  unsigned int speedy =0;
+  unsigned int speedy = 0;
   while (displacement.dist > thresh) {
     // calculate the speed to the target here
     
@@ -1157,7 +1171,7 @@ boolean PID_set_pos_one (unsigned char motor_num, unsigned int target) {
     Serial.print("Speed after adjustment: ");
     Serial.println(speedy);
     cmd_pololu(motor_num, displacement.dir, speedy);
-    current_pos = read_pos_corrected (enc_num_for_motor(motor_num), zero_arr[motor_num + 1]);
+    current_pos = read_pos_corrected (enc_num_for_motor(motor_num),zero_arr[motor_num+1]);
     displacement = find_dir_dist(current_pos, target);
   }
   cmd_pololu(motor_num, 0, 0);
@@ -1165,7 +1179,6 @@ boolean PID_set_pos_one (unsigned char motor_num, unsigned int target) {
   Serial.print("Final error: ");
   Serial.println(displacement.dist);
   return true;
-  
 }
 ///////////////////////////////////////////////////////////////////////////////////////////
 boolean close_enough (unsigned int place, unsigned int target) {
@@ -1573,21 +1586,38 @@ boolean all_oscillate (unsigned int target[3]) {
     to the target location before running subroutine
   */
   // Serial.println("Begin all_oscillate");
+  //SETTING FLIPPER POSITIONS TO TARGET VALUES BEFORE OSCILLATION
+
+//  step_through(1,encoder_1,target[0]);
+//  step_through(2,encoder_2,target[1]);
+//  step_through(3,encoder_3,target[2]);
+  
+//  wigglewaggle(1,10)
+//  wigglewaggle(2,10)
+//  wigglewaggle(3,10)
+  
   Serial.println("Starting Leg Positions:");
   Serial.print(read_position(encoder_1), DEC);
   Serial.print("  ");
   Serial.print(read_position(encoder_2), DEC);
   Serial.print("  ");
   Serial.println(read_position(encoder_3), DEC);
-    cmd_pololu(1, 1, m1_servo.forward);
-    cmd_pololu(2, 1, m2_servo.forward);
-    cmd_pololu(3, 1, m3_servo.forward);
+  
+//    cmd_pololu(1, 1, m1_servo.forward);
+//    cmd_pololu(2, 1, m2_servo.forward);
+//    cmd_pololu(3, 1, m3_servo.forward);
+    cmd_pololu(1, 1, (3*motor_adjust[0])*flip_speed);
+    cmd_pololu(2, 1, (3*motor_adjust[1])*flip_speed);
+    cmd_pololu(3, 1, (3*motor_adjust[2])*flip_speed);
     delay(flip_duration);
     stop_all(); // stop the motor
     delay(motor_stop_delay);
-    cmd_pololu(1, -1, m1_servo.backward);
-    cmd_pololu(2, -1, m2_servo.backward);
-    cmd_pololu(3, -1, m3_servo.backward);
+//    cmd_pololu(1, -1, m1_servo.backward);
+//    cmd_pololu(2, -1, m2_servo.backward);
+//    cmd_pololu(3, -1, m3_servo.backward);
+    cmd_pololu(1, -1, (3*motor_adjust[0])*flip_speed);
+    cmd_pololu(2, -1, (3*motor_adjust[1])*flip_speed);
+    cmd_pololu(3, -1, (3*motor_adjust[2])*flip_speed);
     delay(flip_duration);
     stop_all(); // stop all the motor boxes
     delay(motor_stop_delay); // wait until interference gone
@@ -2154,13 +2184,13 @@ void wiggle_simult(int times){
   //Add motor_num = #
   unsigned char count = 0;
   while (count < times) {
-    cmd_pololu(1, 1, flip_speed);
-    cmd_pololu(2, 1, flip_speed);
-    cmd_pololu(3, 1, flip_speed);
+    cmd_pololu(1, 1, motor_adjust[0]*flip_speed);
+    cmd_pololu(2, 1, motor_adjust[1]*flip_speed);
+    cmd_pololu(3, 1, motor_adjust[2]*flip_speed);
     delay(2*flip_duration);
-    cmd_pololu(1, -1, flip_speed);
-    cmd_pololu(2, -1, flip_speed);
-    cmd_pololu(3, -1, flip_speed);
+    cmd_pololu(1, -1, motor_adjust[0]*flip_speed);
+    cmd_pololu(2, -1, motor_adjust[1]*flip_speed);
+    cmd_pololu(3, -1, motor_adjust[2]*flip_speed);
     delay(2*flip_duration);
     count++;
   }
